@@ -8,8 +8,9 @@ import qualified UI.HSCurses.Curses as C
 
 defaultBoardWidth = 9
 defaultBoardHeight = 20
+origin = (0, 0)
 
-data Cell = CEmpty
+data Cell = CTee
 
 data Block = Block {
   blockPos :: (Int, Int)
@@ -56,13 +57,52 @@ right = blockMoveBy (1, 0)
 addIntInt :: (Int, Int) -> (Int, Int) -> (Int, Int)
 addIntInt lhs rhs = (fst lhs + fst rhs, snd lhs + snd rhs)
 
+geIntInt :: (Int, Int) -> (Int, Int) -> Bool
+geIntInt lhs rhs = fst lhs >= fst rhs && snd lhs >= snd rhs 
+
+ltIntInt :: (Int, Int) -> (Int, Int) -> Bool
+ltIntInt lhs rhs = fst lhs < fst rhs && snd lhs < snd rhs 
+
+boolToMaybe :: a -> Bool -> Maybe a
+boolToMaybe x b =
+    if b
+    then Just x
+    else Nothing
+
+load :: Block -> Board -> Board
+load block board =
+    Board {
+      boardSize = boardSize board,
+      boardCells = Map.insert (blockPos block) CTee $ boardCells board 
+    }  
+
+unload :: Block -> Board -> Board
+unload block board =
+    Board {
+      boardSize = boardSize board,
+      boardCells = Map.delete (blockPos block) $ boardCells board 
+    }
+
+inBound :: Block -> Board -> Maybe Block
+inBound block board =
+    boolToMaybe block $ (blockPos block) `geIntInt` origin
+      && (blockPos block) `ltIntInt` (boardSize board)
+
+collides :: Block -> Board -> Bool
+collides block board =
+    Map.member (blockPos block) (boardCells board)
+
 transform :: (Block -> Block) -> TetrixVar -> Maybe TetrixVar
 transform f var =
+    (f block) `inBound` unloaded                  >>= \b' ->
+    boolToMaybe b' (not $ b' `collides` unloaded) >>= \b' -> 
     Just TetrixVar {
-      gameBlock = block',
-      gameBoard = gameBoard var
+      gameBlock = b',
+      gameBoard = load block board
     }
-    where block' = f $ gameBlock var
+    where block = gameBlock var
+          board = gameBoard var
+          unloaded = unload block board
 
 transformOrNot :: (Block -> Block) -> TetrixVar -> TetrixVar
 transformOrNot f var = fromMaybe var $ transform f var
