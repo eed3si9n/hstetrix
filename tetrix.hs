@@ -40,20 +40,23 @@ initBoard width height =
       boardCells = Map.empty
     }
     
-initBlock =
+initBlock board =
     Block {
-      blockPos = (defaultBoardWidth `div` 2, defaultBoardHeight - 3),
+      blockPos = (fst s `div` 2, snd s - 2),
       blockLocals = [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
     }
+    where s = boardSize board
 
 initState =
     TetrixVar {
-      gameBlock = initBlock,
-      gameBoard = initBoard defaultBoardWidth defaultBoardHeight
+      gameBlock = initBlock board,
+      gameBoard = board
     }
+    where board = initBoard defaultBoardWidth defaultBoardHeight
 
 blockCells :: Block -> [(Int, Int)]
-blockCells block = map (\x -> roundPair x `addPair` blockPos block) $ blockLocals block
+blockCells block =
+    map (\x -> roundPair x `addPair` blockPos block) $ blockLocals block
 
 blockMoveBy :: (Int, Int) -> Block -> Block
 blockMoveBy delta block =
@@ -64,6 +67,7 @@ blockMoveBy delta block =
     
 left = blockMoveBy (-1, 0)
 right = blockMoveBy (1, 0)
+down = blockMoveBy (0, -1)
 
 addPair lhs rhs = (fst lhs + fst rhs, snd lhs + snd rhs)
 
@@ -100,40 +104,46 @@ inBound block board =
     all (\x -> x `gePair` origin
       && x `ltPair` boardSize board) $ blockCells block
 
-inBoundM block board = boolToMaybe block $ block `inBound` board 
-
 collides block board =
     any (\x -> Map.member x $ boardCells board) $ blockCells block
 
+loadBlockOrNot block board var =
+    block `inBoundM` board     >>= \_ ->
+    block `notCollidesM` board >>= \_ ->
+    Just TetrixVar {
+      gameBlock = block,
+      gameBoard = load block board
+    }
+    where notCollidesM b d = boolToMaybe b (not $ b `collides` d)
+          inBoundM b d = boolToMaybe b $ b `inBound` d 
+
 transform :: (Block -> Block) -> TetrixVar -> Maybe TetrixVar
 transform f var =
-    (f block) `inBoundM` unloaded                 >>= \b' ->
-    boolToMaybe b' (not $ b' `collides` unloaded) >>= \b' -> 
-    Just TetrixVar {
-      gameBlock = b',
-      gameBoard = load b' unloaded
-    }
-    where block = gameBlock var
-          board = gameBoard var
-          unloaded = unload block board
+    loadBlockOrNot block' unloaded var
+    where block' = f block
+          block = gameBlock var
+          unloaded = unload block $ gameBoard var
 
-transformOrNot :: (Block -> Block) -> TetrixVar -> TetrixVar
+tick var =
+    fromMaybe hitTheFloor $ transform down var
+    where hitTheFloor = fromMaybe var $ loadNewBlock var
+    
+loadNewBlock var =
+    loadBlockOrNot block' board var
+    where block' = initBlock board
+          board = gameBoard var
+
 transformOrNot f var = fromMaybe var $ transform f var
-       
-transformM :: C.Window -> (Block -> Block) -> TetrixState C.Window
-transformM w f =
+
+transformOrNotM w f = transitionM w (transformOrNot f)
+
+-- state transition function needs to pass around w so it can be used to redraw.
+transitionM :: C.Window -> (TetrixVar-> TetrixVar) -> TetrixState C.Window
+transitionM w f =
     do var <- get
-       let var' = transformOrNot f var
+       let var' = f var
        put var'
        return w
-
-redraw :: C.Window -> Int -> TetrixState ()
-redraw w tick =
-    do liftIO $ C.wclear w
-       var <- get
-       liftIO $ drawTetrix w var
-       liftIO $ C.wMove w 0 0
-       liftIO $ C.refresh
 
 drawTetrix :: C.Window -> TetrixVar -> IO ()
 drawTetrix w var =
@@ -145,23 +155,31 @@ drawBoard w board =
     do mapM_ (\pos ->
          C.mvWAddStr w (defaultBoardHeight - snd pos) (fst pos) "*") $ Map.keys $ boardCells board
 
+redraw w =
+   do liftIO $ C.wclear w
+      var <- get
+      liftIO $ drawTetrix w var
+      liftIO $ C.wMove w 0 0
+      liftIO $ C.refresh
+      
 eventloop :: C.Window -> Int -> TetrixState ()
-eventloop w tick =
-    do case tick of
-           (x) | x == 0 -> process $ transformM w $ blockMoveBy (0, -1)
-               | x > 10 -> eventloop w 0
+eventloop w frame =
+    do case frame of
+           (x) | x == 0 -> process $ transitionM w tick
+               | x > 7 -> eventloop w 0
                | otherwise -> handleKeyEvent                     
     where process f =
             do w' <- f
-               redraw w' tick
-               eventloop w' $ tick + 1
+               redraw w'
+               eventloop w' $ frame + 1
           handleKeyEvent =
             do k <- liftIO C.getch
                case C.decodeKey k of
                  C.KeyChar 'q'  -> return ()
-                 C.KeyLeft      -> process $ transformM w left
-                 C.KeyRight     -> process $ transformM w right
-                 _ -> eventloop w $ tick + 1
+                 C.KeyLeft      -> process $ transformOrNotM w left
+                 C.KeyRight     -> process $ transformOrNotM w right
+                 C.KeyDown      -> process $ transitionM w tick
+                 _ -> eventloop w $ frame + 1
 
 main :: IO ()
 main =
