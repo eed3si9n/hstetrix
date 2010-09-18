@@ -13,12 +13,15 @@ origin = (0, 0)
 data Cell = CTee
 
 data Block = Block {
-  blockPos :: (Int, Int)
+  blockPos :: (Int, Int),
+  blockLocals :: [(Double, Double)]
 }
+
+type CellMap = Map.Map (Int, Int) Cell
 
 data Board = Board {
   boardSize :: (Int, Int),
-  boardCells :: Map.Map (Int, Int) Cell
+  boardCells :: CellMap
 }
 
 data TetrixVar = TetrixVar {
@@ -28,40 +31,48 @@ data TetrixVar = TetrixVar {
 
 type TetrixState = StateT TetrixVar IO
 
-initBoard :: Int -> Int -> Board
+runTetrix :: TetrixState a -> IO a
+runTetrix m = evalStateT m initState
+
 initBoard width height =
     Board {
       boardSize = (width, height),
       boardCells = Map.empty
     }
+    
+initBlock =
+    Block {
+      blockPos = (defaultBoardWidth `div` 2, defaultBoardHeight - 3),
+      blockLocals = [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+    }
 
-initState :: TetrixVar
 initState =
     TetrixVar {
-      gameBlock = Block { blockPos = (5, 0) },
+      gameBlock = initBlock,
       gameBoard = initBoard defaultBoardWidth defaultBoardHeight
     }
 
-runTetrix :: TetrixState a -> IO a
-runTetrix m = evalStateT m initState
+blockCells :: Block -> [(Int, Int)]
+blockCells block = map (\x -> roundPair x `addPair` blockPos block) $ blockLocals block
 
 blockMoveBy :: (Int, Int) -> Block -> Block
 blockMoveBy delta block =
     Block {
-      blockPos = delta `addIntInt` blockPos block
+      blockPos = delta `addPair` blockPos block,
+      blockLocals = blockLocals block
     }
     
 left = blockMoveBy (-1, 0)
 right = blockMoveBy (1, 0)
 
-addIntInt :: (Int, Int) -> (Int, Int) -> (Int, Int)
-addIntInt lhs rhs = (fst lhs + fst rhs, snd lhs + snd rhs)
+addPair lhs rhs = (fst lhs + fst rhs, snd lhs + snd rhs)
 
-geIntInt :: (Int, Int) -> (Int, Int) -> Bool
-geIntInt lhs rhs = fst lhs >= fst rhs && snd lhs >= snd rhs 
+gePair lhs rhs = fst lhs >= fst rhs && snd lhs >= snd rhs 
 
-ltIntInt :: (Int, Int) -> (Int, Int) -> Bool
-ltIntInt lhs rhs = fst lhs < fst rhs && snd lhs < snd rhs 
+ltPair lhs rhs = fst lhs < fst rhs && snd lhs < snd rhs
+
+roundPair :: (Double, Double) -> (Int, Int)
+roundPair p = (round $ fst p, round $ snd p)
 
 boolToMaybe :: a -> Bool -> Maybe a
 boolToMaybe x b =
@@ -69,36 +80,38 @@ boolToMaybe x b =
     then Just x
     else Nothing
 
-load :: Block -> Board -> Board
-load block board =
-    Board {
-      boardSize = boardSize board,
-      boardCells = Map.insert (blockPos block) CTee $ boardCells board 
-    }  
+load block =
+    mapBlockCells step block
+    where step mp x = Map.insert x CTee mp
 
-unload :: Block -> Board -> Board
-unload block board =
+unload block =
+    mapBlockCells step block
+    where step mp x = Map.delete x mp
+
+mapBlockCells :: (CellMap -> (Int, Int) -> CellMap) -> Block -> Board -> Board
+mapBlockCells step block board =
     Board {
       boardSize = boardSize board,
-      boardCells = Map.delete (blockPos block) $ boardCells board 
+      boardCells = foldl step existing $ blockCells block
     }
+    where existing = boardCells board
 
-inBound :: Block -> Board -> Maybe Block
 inBound block board =
-    boolToMaybe block $ (blockPos block) `geIntInt` origin
-      && (blockPos block) `ltIntInt` (boardSize board)
+    all (\x -> x `gePair` origin
+      && x `ltPair` boardSize board) $ blockCells block
 
-collides :: Block -> Board -> Bool
+inBoundM block board = boolToMaybe block $ block `inBound` board 
+
 collides block board =
-    Map.member (blockPos block) (boardCells board)
+    any (\x -> Map.member x $ boardCells board) $ blockCells block
 
 transform :: (Block -> Block) -> TetrixVar -> Maybe TetrixVar
 transform f var =
-    (f block) `inBound` unloaded                  >>= \b' ->
+    (f block) `inBoundM` unloaded                 >>= \b' ->
     boolToMaybe b' (not $ b' `collides` unloaded) >>= \b' -> 
     Just TetrixVar {
       gameBlock = b',
-      gameBoard = load block board
+      gameBoard = load b' unloaded
     }
     where block = gameBlock var
           board = gameBoard var
@@ -124,13 +137,18 @@ redraw w tick =
 
 drawTetrix :: C.Window -> TetrixVar -> IO ()
 drawTetrix w var =
-    do C.mvWAddStr w (snd pos) (fst pos) "*"
-    where pos = blockPos $ gameBlock var
+    do drawBoard w board
+    where board = gameBoard var
+          pos = blockPos $ gameBlock var
+    
+drawBoard w board =
+    do mapM_ (\pos ->
+         C.mvWAddStr w (defaultBoardHeight - snd pos) (fst pos) "*") $ Map.keys $ boardCells board
 
 eventloop :: C.Window -> Int -> TetrixState ()
 eventloop w tick =
     do case tick of
-           (x) | x == 0 -> process $ transformM w $ blockMoveBy (0, 1)
+           (x) | x == 0 -> process $ transformM w $ blockMoveBy (0, -1)
                | x > 10 -> eventloop w 0
                | otherwise -> handleKeyEvent                     
     where process f =
@@ -155,5 +173,5 @@ main =
                C.cBreak True
                C.timeout 100
                C.refresh
-               runTetrix $ eventloop w 0
+               runTetrix $ eventloop w 1
                
