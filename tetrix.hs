@@ -235,6 +235,7 @@ drawTetrix w var =
     do drawCells w base h (Map.keys (boardCells board)) "x"
        drawCells w base h (blockCells block) "*"
        drawCells w base' h' (blockCells nextBlock) "x"
+       C.mvWAddStr w (h + 2) 0 "press 'q' to quit."
     where board = gameBoard var
           block = gameBlock var
           nextBlock = gameNextBlock var 
@@ -243,8 +244,7 @@ drawTetrix w var =
           base = origin
           base' = origin `addPair` (boardWidth board + 2, 0)
           
-drawCells w base h cells s =
-    do mapM_ (drawCell w base h s) cells
+drawCells w base h cells s = do mapM_ (drawCell w base h s) cells
     
 drawCell w base h s pos =
     C.mvWAddStr w (h - snd pos + snd base) (fst pos + fst base) s
