@@ -10,7 +10,9 @@ import qualified UI.HSCurses.Curses as C
 defaultBoardWidth = 9
 defaultBoardHeight = 20
 origin = (0, 0)
-seed = 0 :: Int
+nextBoardHeight = 5
+defaultEventTimeoutMsec = 100
+tickFrequency = 7 -- ticks every 0.7 seconds
 
 data Cell = Tee | Bar | Box | El | Jay | Es | Zee
 
@@ -29,14 +31,15 @@ data Board = Board {
 
 data TetrixVar = TetrixVar {
   gameBlock :: Block,
+  gameNextBlock :: Block,
   gameBoard :: Board,
   gameGen :: StdGen
 }
 
 type TetrixState = StateT TetrixVar IO
 
-runTetrix :: TetrixState a -> IO a
-runTetrix m = evalStateT m initState
+runTetrix :: Int -> TetrixState a -> IO a
+runTetrix seed m = evalStateT m (initState seed)
 
 boardWidth board = fst (boardSize board)
 
@@ -48,32 +51,34 @@ initBoard width height =
       boardCells = Map.empty
     }
     
-initBlock board kind =
+initBlock kind =
     Block {
-      blockPos = ((boardWidth board) `div` 2, (boardHeight board) - 2),
+      blockPos = (3, 3),
       blockLocals = initLocals kind,
       blockKind = kind
     }
 
-initLocals kind =
-    case kind of
-      Tee -> [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
-      Bar -> [(0.0, -1.5), (0.0, -0.5), (0.0, 0.5), (0.0, 1.5)]
-      Box -> [(-0.5, 0.5), (0.5, 0.5), (-0.5, -0.5), (0.5, -0.5)]
-      El  -> [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, -1.0)]
-      Jay -> [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, -1.0)]
-      Es  -> [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, -1.0)]
-      Zee -> [(-0.5, 0.0), (0.5, 0.0), (-0.5, -1.0), (0.5, 1.0)]
+initLocals :: Cell -> [(Double, Double)]
+initLocals Tee = [(0.0, 0.0), (-1.0, 0.0), (1.0, 0.0), (0.0, 1.0)]
+initLocals Bar = [(0.0, -1.5), (0.0, -0.5), (0.0, 0.5), (0.0, 1.5)]
+initLocals Box = [(-0.5, 0.5), (0.5, 0.5), (-0.5, -0.5), (0.5, -0.5)]
+initLocals El  = [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (1.0, -1.0)]
+initLocals Jay = [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, -1.0)]
+initLocals Es  = [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, -1.0)]
+initLocals Zee = [(-0.5, 0.0), (0.5, 0.0), (-0.5, -1.0), (0.5, 1.0)]
 
-initState =
+initState seed =
     TetrixVar {
       gameBlock = block,
+      gameNextBlock = nextBlock,
       gameBoard = board,
-      gameGen = gen'
+      gameGen = gen''
     }
     where board = initBoard defaultBoardWidth defaultBoardHeight
           (kind, gen') = randomKind (mkStdGen seed)
-          block = initBlock board kind
+          (nextKind, gen'') = randomKind gen'
+          block = initBlock kind `moveTo` loadPos board
+          nextBlock = initBlock nextKind
 
 randomKind gen =
     (head $ drop value cells, gen')
@@ -84,6 +89,7 @@ randomKindTransition var =
     (kind,
     TetrixVar {
       gameBlock = gameBlock var,
+      gameNextBlock = gameNextBlock var,
       gameBoard = gameBoard var,
       gameGen = gen'
     })
@@ -93,17 +99,20 @@ blockCells :: Block -> [(Int, Int)]
 blockCells block =
     map (\x -> floorPair x `addPair` blockPos block) $ blockLocals block
 
-blockMoveBy :: (Int, Int) -> Block -> Block
-blockMoveBy delta block =
+loadPos board = ((boardWidth board) `div` 2, (boardHeight board) - 2)
+
+moveTo block pos =
     Block {
-      blockPos = delta `addPair` blockPos block,
+      blockPos = pos,
       blockLocals = blockLocals block,
       blockKind = blockKind block
     }
-    
-left = blockMoveBy (-1, 0)
-right = blockMoveBy (1, 0)
-down = blockMoveBy (0, -1)
+
+moveBy delta block = block `moveTo` (delta `addPair` blockPos block)
+     
+left = moveBy (-1, 0)
+right = moveBy (1, 0)
+down = moveBy (0, -1)
 
 blockRotate :: Double -> Block -> Block
 blockRotate theta block =
@@ -136,10 +145,8 @@ rotatePair p theta =
           s = sin theta        
 
 boolToMaybe :: a -> Bool -> Maybe a
-boolToMaybe x b =
-    if b
-    then Just x
-    else Nothing
+boolToMaybe x True = Just x
+boolToMaybe _ _    = Nothing
 
 load block = mapBlockCells (\mp x -> Map.insert x (blockKind block) mp) block
 
@@ -165,11 +172,12 @@ inBound block board =
 collides block board =
     any (\x -> Map.member x (boardCells board)) (blockCells block)
 
-loadBlockOrNot block board var =
+loadBlockOrNot block nextBlock board var =
     block `inBoundM` board     >>= \_ ->
     block `notCollidesM` board >>= \_ ->
     Just TetrixVar {
       gameBlock = block,
+      gameNextBlock = nextBlock,
       gameBoard = load block board,
       gameGen = gameGen var
     }
@@ -178,9 +186,10 @@ loadBlockOrNot block board var =
 
 transform :: (Block -> Block) -> TetrixVar -> Maybe TetrixVar
 transform f var =
-    loadBlockOrNot block' unloaded var
+    loadBlockOrNot block' nextBlock unloaded var
     where block' = f block
           block = gameBlock var
+          nextBlock = gameNextBlock var
           unloaded = unload block (gameBoard var)
 
 isFilled cells row width =
@@ -191,21 +200,23 @@ removeRow cells row =
     where removed = Map.filterWithKey (\ k _ -> snd k /= row) cells
           (lower, higher) = Map.partitionWithKey (\ k _ -> snd k < row) removed
           moved = Map.mapKeys (\k -> (fst k, snd k - 1)) higher
-    
+
+dropBlock var = maybe (tick var) dropBlock (transform down var)
+      
 tick var =
     fromMaybe hitTheFloor $ transform down var
     where hitTheFloor = fromMaybe var $ loadNewBlock var board'
           board' = mapBoardRows removeIfFilled board
           board = gameBoard var
-          existing = boardCells board
           removeIfFilled row cells =
               if isFilled cells row (boardWidth board)
               then removeRow cells row
               else cells
           
 loadNewBlock var board =
-    loadBlockOrNot block' board var'
-    where block' = initBlock board kind
+    loadBlockOrNot block' nextBlock' board var'
+    where block' = gameNextBlock var `moveTo` loadPos board
+          nextBlock' = initBlock kind
           (kind, var') = randomKindTransition var
 
 transformOrNot f var = fromMaybe var $ transform f var
@@ -215,21 +226,28 @@ transformOrNotM w f = transitionM w (transformOrNot f)
 -- state transition function needs to pass around w so it can be used to redraw.
 transitionM :: C.Window -> (TetrixVar-> TetrixVar) -> TetrixState C.Window
 transitionM w f =
-    do var <- get
-       let var' = f var
-       put var'
+    do var <- get 
+       put (f var)
        return w
 
 drawTetrix :: C.Window -> TetrixVar -> IO ()
 drawTetrix w var =
-    do drawBoard w board
+    do drawCells w base h (Map.keys (boardCells board)) "x"
+       drawCells w base h (blockCells block) "*"
+       drawCells w base' h' (blockCells nextBlock) "x"
     where board = gameBoard var
-          pos = blockPos $ gameBlock var
+          block = gameBlock var
+          nextBlock = gameNextBlock var 
+          h = boardHeight board
+          h' = nextBoardHeight
+          base = origin
+          base' = origin `addPair` (boardWidth board + 2, 0)
+          
+drawCells w base h cells s =
+    do mapM_ (drawCell w base h s) cells
     
-drawBoard w board =
-    do mapM_ drawCell cells
-    where cells = Map.keys (boardCells board)
-          drawCell pos = C.mvWAddStr w ((boardHeight board) - snd pos) (fst pos) "*"
+drawCell w base h s pos =
+    C.mvWAddStr w (h - snd pos + snd base) (fst pos + fst base) s
     
 redraw w =
    do liftIO $ C.wclear w
@@ -242,7 +260,7 @@ eventloop :: C.Window -> Int -> TetrixState ()
 eventloop w frame =
     do case frame of
            (x) | x == 0 -> process $ transitionM w tick
-               | x > 7 -> eventloop w 0
+               | x > tickFrequency -> eventloop w 0
                | otherwise -> handleKeyEvent                     
     where process f =
             do w' <- f
@@ -252,6 +270,7 @@ eventloop w frame =
             do k <- liftIO C.getch
                case C.decodeKey k of
                  C.KeyChar 'q'  -> return ()
+                 C.KeyChar ' '  -> process $ transitionM w dropBlock
                  C.KeyUp        -> process $ transformOrNotM w clockwise
                  C.KeyLeft      -> process $ transformOrNotM w left
                  C.KeyRight     -> process $ transformOrNotM w right
@@ -263,10 +282,11 @@ main =
     do runCurses `finally` C.endWin
     where runCurses =
             do w <- C.initScr
+               seed <- (\x -> fst $ random x) `liftM` getStdGen
                C.keypad w True
                C.echo False
                C.cBreak True
-               C.timeout 100
+               C.timeout defaultEventTimeoutMsec
                C.refresh
-               runTetrix $ eventloop w 1
+               runTetrix seed $ eventloop w 1
                
