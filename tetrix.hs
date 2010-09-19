@@ -29,11 +29,16 @@ data Board = Board {
   boardCells :: CellMap
 }
 
-data TetrixVar = TetrixVar {
+data Game = Game {
   gameBlock :: Block,
   gameNextBlock :: Block,
   gameBoard :: Board,
   gameGen :: StdGen
+}
+
+data TetrixVar = TetrixVar {
+  varGame1 :: Game,
+  varGame2 :: Game
 }
 
 type TetrixState = StateT TetrixVar IO
@@ -67,33 +72,41 @@ initLocals Jay = [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, -1.0)]
 initLocals Es  = [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, -1.0)]
 initLocals Zee = [(-0.5, 0.0), (0.5, 0.0), (-0.5, -1.0), (0.5, 1.0)]
 
-tetrixVar block nextBlock board gen =
-    TetrixVar {
+newGame block nextBlock board gen =
+    Game {
       gameBlock = block,
       gameNextBlock = nextBlock,
       gameBoard = board,
-      gameGen = gen      
+      gameGen = gen    
+    }
+
+newState game1 game2 =
+    TetrixVar {
+      varGame1 = game1,
+      varGame2 = game2 
     }
     
-setGameGen gen var =
-    tetrixVar (gameBlock var) (gameNextBlock var) (gameBoard var) gen
+setVarGen gen game =
+    newGame (gameBlock game) (gameNextBlock game) (gameBoard game) gen
 
-initState seed =
-    tetrixVar block nextBlock board gen''
+initState seed = newState (initGame seed) (initGame seed)
+
+initGame seed =
+    newGame block nextBlock board gen''
     where board = initBoard defaultBoardWidth defaultBoardHeight
-          (kind, gen') = randomKind (mkStdGen seed)
+          (kind, gen') = randomKind $ mkStdGen seed
           (nextKind, gen'') = randomKind gen'
           block = initBlock kind `moveTo` loadPos board
-          nextBlock = initBlock nextKind
+          nextBlock = initBlock nextKind    
 
 randomKind gen =
     (head $ drop value cells, gen')
     where (value, gen') = randomR (0, length cells - 1) gen
           cells = [Tee, Bar, Box, El, Jay, Es, Zee]
           
-randomKindTransition var =
-    (kind, setGameGen gen' var)
-    where (kind, gen') = randomKind (gameGen var)
+randomKindTransition game =
+    (kind, setVarGen gen' game)
+    where (kind, gen') = randomKind (gameGen game)
 
 blockCells :: Block -> [(Int, Int)]
 blockCells block =
@@ -172,20 +185,20 @@ inBound block board =
 collides block board =
     any (\x -> Map.member x (boardCells board)) (blockCells block)
 
-loadBlockOrNot block nextBlock board var =
+loadBlockOrNot block nextBlock board gen =
     block `inBoundM` board     >>= \_ ->
     block `notCollidesM` board >>= \_ ->
-    Just $ tetrixVar block nextBlock (load block board) (gameGen var)
+    Just $ newGame block nextBlock (load block board) gen
     where notCollidesM b d = boolToMaybe b (not $ b `collides` d)
           inBoundM b d = boolToMaybe b $ b `inBound` d 
 
-transform :: (Block -> Block) -> TetrixVar -> Maybe TetrixVar
-transform f var =
-    loadBlockOrNot block' nextBlock unloaded var
+transform :: (Block -> Block) -> Game -> Maybe Game
+transform f game =
+    loadBlockOrNot block' nextBlock unloaded (gameGen game)
     where block' = f block
-          block = gameBlock var
-          nextBlock = gameNextBlock var
-          unloaded = unload block (gameBoard var)
+          block = gameBlock game
+          nextBlock = gameNextBlock game
+          unloaded = unload block (gameBoard game)
 
 isFilled cells row width =
     all (\x -> Map.member (x, row) cells) [0 .. width - 1]
@@ -197,46 +210,51 @@ removeRow cells row =
           moved = Map.mapKeys (\k -> (fst k, snd k - 1)) higher
 
 dropBlock var = maybe (tick var) dropBlock (transform down var)
-      
-tick var =
-    fromMaybe hitTheFloor $ transform down var
-    where hitTheFloor = fromMaybe var $ loadNewBlock var board'
+
+tick :: Game -> Game 
+tick game =
+    fromMaybe hitTheFloor $ transform down game
+    where hitTheFloor = fromMaybe game $ loadNewBlock game board'
           board' = mapBoardRows removeIfFilled board
-          board = gameBoard var
+          board = gameBoard game
           removeIfFilled row cells =
               if isFilled cells row (boardWidth board)
               then removeRow cells row
               else cells
           
-loadNewBlock var board =
-    loadBlockOrNot block' nextBlock' board var'
-    where block' = gameNextBlock var `moveTo` loadPos board
+loadNewBlock game board =
+    loadBlockOrNot block' nextBlock' board gen'
+    where block' = gameNextBlock game `moveTo` loadPos board
           nextBlock' = initBlock kind
-          (kind, var') = randomKindTransition var
+          (kind, gen') = randomKind (gameGen game)
 
-transformOrNot f var = fromMaybe var $ transform f var
+transformOrNot f game = fromMaybe game $ transform f game
 
-transformOrNotM w f = transitionM w (transformOrNot f)
+transformOrNotG1M w f = transitionG1M w (transformOrNot f)
 
+transitionG1M w f =
+    transitionM w (\v -> newState (f $ varGame1 v) (varGame2 v))
+    
 -- state transition function needs to pass around w so it can be used to redraw.
-transitionM :: C.Window -> (TetrixVar-> TetrixVar) -> TetrixState C.Window
+transitionM :: C.Window -> (TetrixVar -> TetrixVar) -> TetrixState C.Window
 transitionM w f =
     do var <- get 
        put (f var)
        return w
 
 drawTetrix :: C.Window -> TetrixVar -> IO ()
-drawTetrix w var =
+drawTetrix w var = drawGame w origin (varGame1 var)
+
+drawGame w base game =
     do drawCells w base h (Map.keys (boardCells board)) "x"
        drawCells w base h (blockCells block) "*"
        drawCells w base' h' (blockCells nextBlock) "x"
        C.mvWAddStr w (h + 2) 0 "press 'q' to quit."
-    where board = gameBoard var
-          block = gameBlock var
-          nextBlock = gameNextBlock var 
+    where board = gameBoard game
+          block = gameBlock game
+          nextBlock = gameNextBlock game 
           h = boardHeight board
           h' = nextBoardHeight
-          base = origin
           base' = origin `addPair` (boardWidth board + 2, 0)
           
 drawCells w base h cells s = do mapM_ (drawCell w base h s) cells
@@ -254,7 +272,7 @@ redraw w =
 eventloop :: C.Window -> Int -> TetrixState ()
 eventloop w frame =
     do case frame of
-           (x) | x == 0 -> process $ transitionM w tick
+           (x) | x == 0 -> process $ transitionG1M w tick
                | x > tickFrequency -> eventloop w 0
                | otherwise -> handleKeyEvent                     
     where process f =
@@ -265,11 +283,11 @@ eventloop w frame =
             do k <- liftIO C.getch
                case C.decodeKey k of
                  C.KeyChar 'q'  -> return ()
-                 C.KeyChar ' '  -> process $ transitionM w dropBlock
-                 C.KeyUp        -> process $ transformOrNotM w clockwise
-                 C.KeyLeft      -> process $ transformOrNotM w left
-                 C.KeyRight     -> process $ transformOrNotM w right
-                 C.KeyDown      -> process $ transitionM w tick
+                 C.KeyChar ' '  -> process $ transitionG1M w dropBlock
+                 C.KeyUp        -> process $ transformOrNotG1M w clockwise
+                 C.KeyLeft      -> process $ transformOrNotG1M w left
+                 C.KeyRight     -> process $ transformOrNotG1M w right
+                 C.KeyDown      -> process $ transitionG1M w tick
                  _ -> eventloop w $ frame + 1
 
 main :: IO ()
