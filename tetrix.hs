@@ -67,13 +67,19 @@ initLocals Jay = [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, -1.0)]
 initLocals Es  = [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, -1.0)]
 initLocals Zee = [(-0.5, 0.0), (0.5, 0.0), (-0.5, -1.0), (0.5, 1.0)]
 
-initState seed =
+tetrixVar block nextBlock board gen =
     TetrixVar {
       gameBlock = block,
       gameNextBlock = nextBlock,
       gameBoard = board,
-      gameGen = gen''
+      gameGen = gen      
     }
+    
+setGameGen gen var =
+    tetrixVar (gameBlock var) (gameNextBlock var) (gameBoard var) gen
+
+initState seed =
+    tetrixVar block nextBlock board gen''
     where board = initBoard defaultBoardWidth defaultBoardHeight
           (kind, gen') = randomKind (mkStdGen seed)
           (nextKind, gen'') = randomKind gen'
@@ -86,13 +92,7 @@ randomKind gen =
           cells = [Tee, Bar, Box, El, Jay, Es, Zee]
           
 randomKindTransition var =
-    (kind,
-    TetrixVar {
-      gameBlock = gameBlock var,
-      gameNextBlock = gameNextBlock var,
-      gameBoard = gameBoard var,
-      gameGen = gen'
-    })
+    (kind, setGameGen gen' var)
     where (kind, gen') = randomKind (gameGen var)
 
 blockCells :: Block -> [(Int, Int)]
@@ -175,12 +175,7 @@ collides block board =
 loadBlockOrNot block nextBlock board var =
     block `inBoundM` board     >>= \_ ->
     block `notCollidesM` board >>= \_ ->
-    Just TetrixVar {
-      gameBlock = block,
-      gameNextBlock = nextBlock,
-      gameBoard = load block board,
-      gameGen = gameGen var
-    }
+    Just $ tetrixVar block nextBlock (load block board) (gameGen var)
     where notCollidesM b d = boolToMaybe b (not $ b `collides` d)
           inBoundM b d = boolToMaybe b $ b `inBound` d 
 
