@@ -38,6 +38,10 @@ type TetrixState = StateT TetrixVar IO
 runTetrix :: TetrixState a -> IO a
 runTetrix m = evalStateT m initState
 
+boardWidth board = fst (boardSize board)
+
+boardHeight board = snd (boardSize board)
+
 initBoard width height =
     Board {
       boardSize = (width, height),
@@ -46,11 +50,10 @@ initBoard width height =
     
 initBlock board kind =
     Block {
-      blockPos = (fst s `div` 2, snd s - 2),
+      blockPos = ((boardWidth board) `div` 2, (boardHeight board) - 2),
       blockLocals = initLocals kind,
       blockKind = kind
     }
-    where s = boardSize board
 
 initLocals kind =
     case kind of
@@ -117,8 +120,10 @@ clockwise = blockRotate $ (-pi) / 2
     
 addPair lhs rhs = (fst lhs + fst rhs, snd lhs + snd rhs)
 
+-- >= doesn't do what i want
 gePair lhs rhs = fst lhs >= fst rhs && snd lhs >= snd rhs 
 
+-- < doesn't do what i want
 ltPair lhs rhs = fst lhs < fst rhs && snd lhs < snd rhs
 
 floorPair :: (Double, Double) -> (Int, Int)
@@ -144,16 +149,21 @@ mapBlockCells :: (CellMap -> (Int, Int) -> CellMap) -> Block -> Board -> Board
 mapBlockCells step block board =
     Board {
       boardSize = boardSize board,
-      boardCells = foldl step existing $ blockCells block
+      boardCells = foldl step (boardCells board) (blockCells block)
     }
-    where existing = boardCells board
+
+mapBoardRows step board =
+    Board {
+      boardSize = boardSize board,
+      boardCells = foldr step (boardCells board) [0 .. (boardHeight board) - 1]     
+    }
 
 inBound block board =
     all (\x -> x `gePair` origin
-      && x `ltPair` boardSize board) $ blockCells block
+      && x `ltPair` boardSize board) (blockCells block)
 
 collides block board =
-    any (\x -> Map.member x $ boardCells board) $ blockCells block
+    any (\x -> Map.member x (boardCells board)) (blockCells block)
 
 loadBlockOrNot block board var =
     block `inBoundM` board     >>= \_ ->
@@ -171,16 +181,31 @@ transform f var =
     loadBlockOrNot block' unloaded var
     where block' = f block
           block = gameBlock var
-          unloaded = unload block $ gameBoard var
+          unloaded = unload block (gameBoard var)
 
+isFilled cells row width =
+    all (\x -> Map.member (x, row) cells) [0 .. width - 1]
+
+removeRow cells row =
+    lower `Map.union` moved
+    where removed = Map.filterWithKey (\ k _ -> snd k /= row) cells
+          (lower, higher) = Map.partitionWithKey (\ k _ -> snd k < row) removed
+          moved = Map.mapKeys (\k -> (fst k, snd k - 1)) higher
+    
 tick var =
     fromMaybe hitTheFloor $ transform down var
-    where hitTheFloor = fromMaybe var $ loadNewBlock var
-    
-loadNewBlock var =
+    where hitTheFloor = fromMaybe var $ loadNewBlock var board'
+          board' = mapBoardRows removeIfFilled board
+          board = gameBoard var
+          existing = boardCells board
+          removeIfFilled row cells =
+              if isFilled cells row (boardWidth board)
+              then removeRow cells row
+              else cells
+          
+loadNewBlock var board =
     loadBlockOrNot block' board var'
     where block' = initBlock board kind
-          board = gameBoard var
           (kind, var') = randomKindTransition var
 
 transformOrNot f var = fromMaybe var $ transform f var
@@ -203,8 +228,8 @@ drawTetrix w var =
     
 drawBoard w board =
     do mapM_ drawCell cells
-    where cells = Map.keys $ boardCells board
-          drawCell pos = C.mvWAddStr w (defaultBoardHeight - snd pos) (fst pos) "*"
+    where cells = Map.keys (boardCells board)
+          drawCell pos = C.mvWAddStr w ((boardHeight board) - snd pos) (fst pos) "*"
     
 redraw w =
    do liftIO $ C.wclear w
