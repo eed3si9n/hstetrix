@@ -15,6 +15,7 @@ defaultEventTimeoutMsec = 100
 tickFrequency = 7 -- ticks every 0.7 seconds
 
 data Cell = Tee | Bar | Box | El | Jay | Es | Zee
+data Action = ActionL | ActionR | ActionC
 
 data Block = Block {
   blockPos :: (Int, Int),
@@ -33,6 +34,7 @@ data Game = Game {
   gameBlock :: Block,
   gameNextBlock :: Block,
   gameBoard :: Board,
+  gameLines :: Int,
   gameGen :: StdGen
 }
 
@@ -72,11 +74,12 @@ initLocals Jay = [(0.0, 0.0), (0.0, 1.0), (0.0, -1.0), (-1.0, -1.0)]
 initLocals Es  = [(-0.5, 0.0), (0.5, 0.0), (-0.5, 1.0), (0.5, -1.0)]
 initLocals Zee = [(-0.5, 0.0), (0.5, 0.0), (-0.5, -1.0), (0.5, 1.0)]
 
-newGame block nextBlock board gen =
+newGame block nextBlock board lns gen =
     Game {
       gameBlock = block,
       gameNextBlock = nextBlock,
       gameBoard = board,
+      gameLines = lns,
       gameGen = gen    
     }
 
@@ -87,12 +90,13 @@ newState game1 game2 =
     }
     
 setVarGen gen game =
-    newGame (gameBlock game) (gameNextBlock game) (gameBoard game) gen
+    newGame (gameBlock game) (gameNextBlock game) 
+      (gameBoard game) (gameLines game) gen
 
 initState seed = newState (initGame seed) (initGame seed)
 
 initGame seed =
-    newGame block nextBlock board gen''
+    newGame block nextBlock board 0 gen''
     where board = initBoard defaultBoardWidth defaultBoardHeight
           (kind, gen') = randomKind $ mkStdGen seed
           (nextKind, gen'') = randomKind gen'
@@ -173,10 +177,12 @@ mapBlockCells step block board =
     }
 
 mapBoardRows step board =
-    Board {
+    (Board {
       boardSize = boardSize board,
-      boardCells = foldr step (boardCells board) [0 .. (boardHeight board) - 1]     
-    }
+      boardCells = cells'
+    }, removed)
+    where (cells', removed) = foldr step (cells, 0) [0 .. (boardHeight board) - 1]
+          cells = boardCells board
 
 inBound block board =
     all (\x -> x `gePair` origin
@@ -185,16 +191,16 @@ inBound block board =
 collides block board =
     any (\x -> Map.member x (boardCells board)) (blockCells block)
 
-loadBlockOrNot block nextBlock board gen =
+loadBlockOrNot block nextBlock board lns gen =
     block `inBoundM` board     >>= \_ ->
     block `notCollidesM` board >>= \_ ->
-    Just $ newGame block nextBlock (load block board) gen
+    Just $ newGame block nextBlock (load block board) lns gen
     where notCollidesM b d = boolToMaybe b (not $ b `collides` d)
           inBoundM b d = boolToMaybe b $ b `inBound` d 
 
 transform :: (Block -> Block) -> Game -> Maybe Game
 transform f game =
-    loadBlockOrNot block' nextBlock unloaded (gameGen game)
+    loadBlockOrNot block' nextBlock unloaded (gameLines game) (gameGen game)
     where block' = f block
           block = gameBlock game
           nextBlock = gameNextBlock game
@@ -209,24 +215,41 @@ removeRow cells row =
           (lower, higher) = Map.partitionWithKey (\ k _ -> snd k < row) removed
           moved = Map.mapKeys (\k -> (fst k, snd k - 1)) higher
 
-dropBlock var = maybe (tick var) dropBlock (transform down var)
+dropBlock game = maybe (tick game) dropBlock (transform down game)
 
 tick :: Game -> Game 
 tick game =
     fromMaybe hitTheFloor $ transform down game
-    where hitTheFloor = fromMaybe game $ loadNewBlock game board'
-          board' = mapBoardRows removeIfFilled board
+    where hitTheFloor = fromMaybe game $ loadNewBlock (removeFilled game)
+    
+removeFilled :: Game -> Game
+removeFilled game =
+    newGame (gameBlock game) (gameNextBlock game) board' lns' (gameGen game)
+    where (board', removed') = mapBoardRows removeIfFilled board
+          lns' = (gameLines game) + removed'
           board = gameBoard game
-          removeIfFilled row cells =
+          removeIfFilled row (cells, removed) =
               if isFilled cells row (boardWidth board)
-              then removeRow cells row
-              else cells
+              then (removeRow cells row, removed + 1)
+              else (cells, removed)
           
-loadNewBlock game board =
-    loadBlockOrNot block' nextBlock' board gen'
+loadNewBlock game =
+    loadBlockOrNot block' nextBlock' board (gameLines game) gen'
     where block' = gameNextBlock game `moveTo` loadPos board
           nextBlock' = initBlock kind
           (kind, gen') = randomKind (gameGen game)
+          board = gameBoard game
+          
+isLegal actions game =
+    maybe False (\_ -> True) $ foldl step (Just game) fs
+    where fs = map fromAction actions
+          step Nothing _ = Nothing
+          step (Just g) f = transform f g 
+    
+fromAction :: Action -> (Block -> Block)
+fromAction ActionL = left
+fromAction ActionR = right
+fromAction ActionC = clockwise
 
 transformOrNot f game = fromMaybe game $ transform f game
 
@@ -249,13 +272,15 @@ drawGame w base game =
     do drawCells w base h (Map.keys (boardCells board)) "x"
        drawCells w base h (blockCells block) "*"
        drawCells w base' h' (blockCells nextBlock) "x"
+       C.mvWAddStr w (h' + 2) (wd + 2) $ "lines: " ++ (show $ gameLines game)
        C.mvWAddStr w (h + 2) 0 "press 'q' to quit."
     where board = gameBoard game
           block = gameBlock game
           nextBlock = gameNextBlock game 
           h = boardHeight board
+          wd = boardWidth board
           h' = nextBoardHeight
-          base' = origin `addPair` (boardWidth board + 2, 0)
+          base' = origin `addPair` (wd + 2, 0)
           
 drawCells w base h cells s = do mapM_ (drawCell w base h s) cells
     
@@ -278,7 +303,7 @@ eventloop w frame =
     where process f =
             do w' <- f
                redraw w'
-               eventloop w' $ frame + 1
+               eventloop w' (frame + 1)
           handleKeyEvent =
             do k <- liftIO C.getch
                case C.decodeKey k of
@@ -288,7 +313,7 @@ eventloop w frame =
                  C.KeyLeft      -> process $ transformOrNotG1M w left
                  C.KeyRight     -> process $ transformOrNotG1M w right
                  C.KeyDown      -> process $ transitionG1M w tick
-                 _ -> eventloop w $ frame + 1
+                 _ -> eventloop w (frame + 1)
 
 main :: IO ()
 main =
